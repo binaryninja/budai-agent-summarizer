@@ -72,33 +72,62 @@ class AgentSummarizerService:
         self.observability = init_observability("agent-summarizer", self.settings.service_version)
         self.health_checker = HealthChecker("agent-summarizer", self.settings.service_version)
         
-        # Event bus (for publishing events)
-        self.event_bus = create_event_bus(self.settings.redis_url)
+        # Event bus (for publishing events) - gracefully handle Redis unavailability
+        try:
+            self.event_bus = create_event_bus(self.settings.redis_url)
+            logger.info("Event bus initialized successfully")
+        except Exception as exc:
+            logger.warning("Failed to initialize event bus: %s. Service will continue without event publishing.", exc)
+            self.event_bus = None
         
-        # Create agent
-        self.agent = create_summarizer_agent(
-            model=self.settings.openai_default_model,
-            reasoning_effort=self.settings.reasoning_effort,
-        )
+        # Create agent - gracefully handle initialization errors
+        try:
+            self.agent = create_summarizer_agent(
+                model=self.settings.openai_default_model,
+                reasoning_effort=self.settings.reasoning_effort,
+            )
+            logger.info("Agent initialized successfully with model: %s", self.settings.openai_default_model)
+        except Exception as exc:
+            logger.error("Failed to initialize agent: %s", exc)
+            self.agent = None
         
         # Register health checks
         self._register_health_checks()
 
     def _register_health_checks(self) -> None:
         """Register service health checks."""
-        self.health_checker.register_check("liveness", lambda: True)
+        # Liveness check - always passes if service is running
+        self.health_checker.register_check("liveness", lambda: (True, "Service is running"))
         
-        # Redis health check
-        async def redis_check() -> tuple[bool, str]:
-            return await check_redis_connection(self.event_bus.redis)
+        # Redis health check - only if event bus is available
+        if self.event_bus is not None:
+            async def redis_check() -> tuple[bool, str]:
+                try:
+                    return await check_redis_connection(self.event_bus.redis)
+                except Exception as exc:
+                    return (False, f"Redis check failed: {exc}")
+            
+            self.health_checker.register_check("redis", redis_check)
+        else:
+            # Register a check that reports Redis as unavailable but not critical
+            self.health_checker.register_check("redis", lambda: (False, "Event bus not initialized"))
         
-        self.health_checker.register_check("redis", redis_check)
+        # OpenAI API health check - make it non-blocking
+        async def openai_check() -> tuple[bool, str]:
+            try:
+                return await check_openai_api(self.settings.openai_api_key)
+            except Exception as exc:
+                return (False, f"OpenAI check failed: {exc}")
         
-        # OpenAI API health check
-        self.health_checker.register_check(
-            "openai_api",
-            lambda: check_openai_api(self.settings.openai_api_key),
-        )
+        self.health_checker.register_check("openai_api", openai_check)
+        
+        # Agent check
+        def agent_check() -> tuple[bool, str]:
+            if self.agent is not None:
+                return (True, "Agent initialized")
+            return (False, "Agent not initialized")
+        
+        self.health_checker.register_check("agent", agent_check)
 
     async def initialize(self) -> None:
         """Initialize async components."""
@@ -117,6 +146,14 @@ class AgentSummarizerService:
         Returns:
             Summarization response
         """
+        # Check if agent is initialized
+        if self.agent is None:
+            logger.error("Cannot summarize: agent not initialized")
+            raise HTTPException(
+                status_code=503,
+                detail="Service unavailable: agent not initialized. Check environment variables.",
+            )
+        
         with self.observability.trace_operation("agent.summarize") as span:
             span.set_tag("task_id", request.task_id)
             span.set_tag("meeting_id", request.meeting_id)
@@ -141,6 +178,21 @@ class AgentSummarizerService:
                     {"agent": "summarizer"},
                 )
                 
+                # Publish event if event bus is available
+                if self.event_bus is not None:
+                    try:
+                        from shared import SummaryGeneratedEvent
+                        event = SummaryGeneratedEvent(
+                            meeting_id=request.meeting_id,
+                            summary=summary.summary,
+                            action_items=[item.model_dump() for item in summary.action_items],
+                            risks=summary.risks,
+                            summary_metadata=summary.metadata,
+                        )
+                        await self.event_bus.publish(event)
+                    except Exception as event_exc:
+                        logger.warning("Failed to publish event: %s", event_exc)
+                
                 # Convert to response
                 response = SummarizeResponse(
                     task_id=request.task_id,
@@ -164,6 +216,8 @@ class AgentSummarizerService:
                 
                 return response
             
+            except HTTPException:
+                raise
             except Exception as exc:
                 logger.exception("Failed to summarize meeting: %s", exc)
                 
@@ -188,7 +242,14 @@ service = AgentSummarizerService()
 async def startup_event() -> None:
     """Initialize on startup."""
     await service.initialize()
+    logger.info("=" * 60)
     logger.info("Agent summarizer service started")
+    logger.info("Environment: %s", service.settings.environment)
+    logger.info("Port: %s", service.settings.port)
+    logger.info("Model: %s", service.settings.openai_default_model)
+    logger.info("Agent initialized: %s", service.agent is not None)
+    logger.info("Event bus initialized: %s", service.event_bus is not None)
+    logger.info("=" * 60)
 
 
 @app.on_event("shutdown")
@@ -212,10 +273,20 @@ async def root() -> JSONResponse:
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    """Health check endpoint per PRIME_DIRECTIVE requirements."""
+    """Health check endpoint per PRIME_DIRECTIVE requirements.
+    
+    Returns 200 if the liveness check passes (service is running).
+    Dependency failures (Redis, OpenAI) are reported but don't fail the health check.
+    """
     health_report = await service.health_checker.check_health()
     
-    status_code = 200 if health_report.is_available() else 503
+    # Check if liveness check passed - that's all we need for Railway health check
+    liveness_check = next((c for c in health_report.checks if c.name == "liveness"), None)
+    is_alive = liveness_check and liveness_check.status == "healthy"
+    
+    # Return 200 if service is alive, even if some dependencies are unhealthy
+    # This allows the service to start and be marked as healthy by Railway
+    status_code = 200 if is_alive else 503
     
     return JSONResponse(
         content=health_report.model_dump(),

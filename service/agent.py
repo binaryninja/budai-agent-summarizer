@@ -15,18 +15,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from pydantic import BaseModel
 
-# Import agents from the original SDK (we'll need to include it)
+# Import OpenAI client directly for now since agents SDK may not be available
 try:
-    from agents import Agent, AgentOutputSchema, ModelSettings
-    from agents.run import RunConfig
-    from openai.types.shared import Reasoning
+    from openai import AsyncOpenAI
+    OPENAI_AVAILABLE = True
 except ImportError:
-    # Fallback - we'll need to copy the agents SDK or install it
-    Agent = None
-    AgentOutputSchema = None
-    ModelSettings = None
-    RunConfig = None
-    Reasoning = None
+    AsyncOpenAI = None
+    OPENAI_AVAILABLE = False
+
+# Placeholder for agents SDK compatibility
+Agent = None
+AgentOutputSchema = None
+ModelSettings = None
+RunConfig = None
+Reasoning = None
 
 
 class ActionItem(BaseModel):
@@ -60,26 +62,24 @@ class MeetingSummary(BaseModel):
     metadata: Dict[str, Any] = {}
 
 
-def create_summarizer_agent(
-    model: str = "gpt-4",
-    reasoning_effort: str = "medium",
-) -> Agent:
-    """Create the meeting summarizer agent.
-
-    The agent produces a deterministic JSON structure that can be fed to
-    the follow-up agent and notification templates.
-
-    Args:
-        model: OpenAI model to use
-        reasoning_effort: Reasoning effort level (low, medium, high)
-
-    Returns:
-        Configured Agent instance
-    """
-    if Agent is None:
-        raise RuntimeError("OpenAI Agents SDK not available. Install openai-agents package.")
-
-    instructions = """You are a professional meeting summarizer specializing in sales calls and business meetings.
+class SimpleSummarizerAgent:
+    """Simplified summarizer agent using direct OpenAI API."""
+    
+    def __init__(self, model: str = "gpt-4", api_key: Optional[str] = None):
+        """Initialize the agent.
+        
+        Args:
+            model: OpenAI model to use
+            api_key: OpenAI API key (or from env)
+        """
+        import os
+        self.model = model
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("BUDAI_OPENAI_API_KEY")
+        if not OPENAI_AVAILABLE:
+            raise RuntimeError("OpenAI package not available")
+        self.client = AsyncOpenAI(api_key=self.api_key)
+        
+        self.instructions = """You are a professional meeting summarizer specializing in sales calls and business meetings.
 
 Your role is to:
 1. Extract key points, decisions, and action items from meeting transcripts
@@ -102,23 +102,43 @@ Your output will be used for:
 - CRM updates
 - Team notifications
 - Executive reporting
+
+Respond with a valid JSON object following this structure:
+{
+  "title": "meeting title",
+  "summary": "executive summary",
+  "key_points": ["point1", "point2"],
+  "action_items": [{"description": "...", "owner": "...", "due_date": "...", "priority": "..."}],
+  "decisions": [{"decision": "...", "rationale": "...", "stakeholders": []}],
+  "risks": ["risk1", "risk2"],
+  "next_steps": ["step1", "step2"],
+  "attendees_mentioned": ["name1", "name2"],
+  "metadata": {}
+}
 """
 
-    return Agent(
-        name="Meeting Summarizer",
-        instructions=instructions,
-        model=model,
-        model_settings=ModelSettings(
-            reasoning=Reasoning(effort=reasoning_effort),
-            verbosity="low",
-        ) if Reasoning else None,
-        tools=[],  # No external tools needed for summarization
-        output_type=AgentOutputSchema(MeetingSummary, strict_json_schema=False),
-    )
+
+def create_summarizer_agent(
+    model: str = "gpt-4",
+    reasoning_effort: str = "medium",
+) -> SimpleSummarizerAgent:
+    """Create the meeting summarizer agent.
+
+    The agent produces a deterministic JSON structure that can be fed to
+    the follow-up agent and notification templates.
+
+    Args:
+        model: OpenAI model to use
+        reasoning_effort: Reasoning effort level (low, medium, high)
+
+    Returns:
+        Configured Agent instance
+    """
+    return SimpleSummarizerAgent(model=model)
 
 
 async def summarize_meeting(
-    agent: Agent,
+    agent: SimpleSummarizerAgent,
     meeting_id: str,
     title: str,
     transcript: str,
@@ -136,6 +156,11 @@ async def summarize_meeting(
     Returns:
         Structured meeting summary
     """
+    import json
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
     # Prepare input prompt
     context_str = ""
     if additional_context:
@@ -143,7 +168,7 @@ async def summarize_meeting(
         for key, value in additional_context.items():
             context_str += f"- {key}: {value}\n"
 
-    prompt = f"""Meeting: {title}
+    user_prompt = f"""Meeting: {title}
 Meeting ID: {meeting_id}
 {context_str}
 
@@ -152,21 +177,53 @@ Transcript:
 
 Please provide a comprehensive summary of this meeting."""
 
-    # Run agent
-    from agents import Runner
-
-    runner = Runner(agent)
-    result = await runner.run(prompt)
-
-    # Extract structured output
-    if hasattr(result, 'output') and isinstance(result.output, MeetingSummary):
-        summary = result.output
-    else:
-        # Fallback if structured output fails
+    try:
+        # Call OpenAI API with structured output request
+        response = await agent.client.chat.completions.create(
+            model=agent.model,
+            messages=[
+                {"role": "system", "content": agent.instructions},
+                {"role": "user", "content": user_prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+        )
+        
+        # Parse the response
+        content = response.choices[0].message.content
+        result_data = json.loads(content)
+        
+        # Convert action items and decisions to proper models
+        action_items = [
+            ActionItem(**item) if isinstance(item, dict) else ActionItem(description=str(item))
+            for item in result_data.get("action_items", [])
+        ]
+        
+        decisions = [
+            Decision(**dec) if isinstance(dec, dict) else Decision(decision=str(dec))
+            for dec in result_data.get("decisions", [])
+        ]
+        
+        # Create summary object
+        summary = MeetingSummary(
+            title=result_data.get("title", title),
+            summary=result_data.get("summary", ""),
+            key_points=result_data.get("key_points", []),
+            action_items=action_items,
+            decisions=decisions,
+            risks=result_data.get("risks", []),
+            next_steps=result_data.get("next_steps", []),
+            attendees_mentioned=result_data.get("attendees_mentioned", []),
+            metadata=result_data.get("metadata", {}),
+        )
+        
+    except Exception as exc:
+        logger.error(f"Failed to generate summary: {exc}")
+        # Fallback summary
         summary = MeetingSummary(
             title=title,
-            summary="Summary generation failed - structured output not available",
-            metadata={"meeting_id": meeting_id, "error": "structured_output_failed"},
+            summary=f"Summary generation encountered an error: {str(exc)}",
+            metadata={"meeting_id": meeting_id, "error": str(exc)},
         )
 
     # Add metadata
@@ -179,7 +236,7 @@ Please provide a comprehensive summary of this meeting."""
 
 # Synchronous wrapper for compatibility
 def summarize_meeting_sync(
-    agent: Agent,
+    agent: SimpleSummarizerAgent,
     meeting_id: str,
     title: str,
     transcript: str,

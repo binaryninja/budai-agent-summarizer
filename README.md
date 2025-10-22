@@ -63,19 +63,47 @@ The service will start on `http://localhost:8002`.
 
 ## Railway Deployment
 
-Deploy directly from this repository:
+### Required Environment Variables
 
-```bash
-# Using Railway CLI
-railway up
+Make sure these environment variables are set in Railway:
 
-# Or via Railway dashboard
-# 1. Connect this repository
-# 2. Set environment variables
-# 3. Deploy
-```
+**Required:**
+- `BUDAI_OPENAI_API_KEY` - Your OpenAI API key (starts with `sk-`)
+- `PORT` - Port for the service (Railway sets this automatically, typically 8002)
+
+**Optional (with defaults):**
+- `BUDAI_REDIS_URL` - Redis connection URL (defaults to `redis://localhost:6379/0`)
+- `BUDAI_OPENAI_DEFAULT_MODEL` - OpenAI model to use (defaults to `gpt-4`)
+- `BUDAI_ENVIRONMENT` - Environment name (defaults to `development`)
+
+### Deployment Steps
+
+1. **Set Environment Variables in Railway:**
+   ```
+   BUDAI_OPENAI_API_KEY=sk-your-api-key-here
+   ```
+
+2. **Deploy:**
+   ```bash
+   # Using Railway CLI
+   railway up
+
+   # Or via Railway dashboard
+   # 1. Connect this repository
+   # 2. Set environment variables
+   # 3. Deploy
+   ```
 
 The Railway configuration is defined in `railway.json`.
+
+### Health Check Configuration
+
+The service includes a graceful health check that:
+- Returns 200 if the service is running (liveness check)
+- Reports dependency status (Redis, OpenAI) without failing the check
+- Allows the service to start even if some dependencies are unavailable
+
+This ensures Railway marks the deployment as successful even if Redis is not configured.
 
 ## Health Check
 
@@ -168,8 +196,43 @@ The agent-summarizer is stateless and can be scaled based on meeting load:
 
 ## Dependencies
 
-- **Redis:** Health checks and event subscription (required)
-- **OpenAI API:** GPT-4 for summarization (required)
+- **Redis:** Health checks and event subscription (optional - service will start without it)
+- **OpenAI API:** GPT-4 for summarization (required for actual summarization)
+
+## Troubleshooting
+
+### Health Check Failures on Railway
+
+If your deployment is failing health checks:
+
+1. **Check logs for startup errors:**
+   - Look for "Agent initialized: False" - indicates OpenAI API key issue
+   - Look for "Event bus initialized: False" - indicates Redis connection issue (non-critical)
+
+2. **Verify environment variables:**
+   - `BUDAI_OPENAI_API_KEY` must be set correctly
+   - Make sure the API key starts with `sk-`
+
+3. **Test health endpoint:**
+   ```bash
+   curl https://your-service.railway.app/health
+   ```
+   Should return 200 even if dependencies are unhealthy
+
+4. **Check Railway logs:**
+   - The service logs startup information including initialization status
+   - Look for the "=" bordered startup message with component status
+
+### Common Issues
+
+**Issue:** Service fails to start with "agent not initialized"
+- **Solution:** Set `BUDAI_OPENAI_API_KEY` environment variable in Railway
+
+**Issue:** Service starts but summarization endpoint returns 503
+- **Solution:** Agent initialization failed. Check that OpenAI API key is valid and has credits
+
+**Issue:** Redis connection errors in logs
+- **Solution:** This is non-critical. The service will work without Redis, but events won't be published
 
 ## License
 
