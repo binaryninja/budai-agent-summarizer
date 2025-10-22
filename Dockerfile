@@ -33,5 +33,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"
 
 # Run the service
-CMD ["python", "service/service.py"]
+CMD ["python", "-m", "service.service"]
 
