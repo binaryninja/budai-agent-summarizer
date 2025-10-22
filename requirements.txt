@@ -1,0 +1,47 @@
+# BudAI Core Dependencies
+
+# Web framework
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+# HTTP client
+httpx>=0.27.0
+
+# Data validation
+pydantic>=2.10.0
+pydantic-settings>=2.2.1
+
+# Redis (event bus and session storage)
+redis[asyncio]>=5.0.1
+
+# OpenAI SDK (agents and realtime API)
+openai>=2.2.0
+
+# Agents SDK dependencies
+griffe>=1.5.6
+typing-extensions>=4.12.2
+
+# Configuration
+pyyaml>=6.0.1
+
+# Slack SDK
+slack-sdk>=3.26.0
+
+# Google Calendar integration (optional)
+google-auth>=2.23.0
+google-auth-oauthlib>=1.1.0
+google-auth-httplib2>=0.1.1
+google-api-python-client>=2.100.0
+
+# WebSockets for Realtime API
+websockets>=15.0
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
+pytest-mock>=3.14.0
+
+# Code quality
+ruff>=0.9.2
+mypy>=1.0.0
+
