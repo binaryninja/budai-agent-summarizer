@@ -159,6 +159,7 @@ class APIGatewaySettings(BaseServiceSettings):
     # Upstream services
     orchestrator_url: str = Field("http://orchestrator:8001", description="Orchestrator service URL")
     voice_realtime_url: str = Field("http://voice-realtime:8005", description="Voice service URL")
+    notion_agent_url: str = Field("http://agent-notion:8007", description="Notion agent service URL")
 
 
 class OrchestratorSettings(BaseServiceSettings):
@@ -226,4 +227,3 @@ def create_service_settings(service_name: str) -> BaseServiceSettings:
 
     settings_class = settings_map.get(service_name, BaseServiceSettings)
     return settings_class()
-
